@@ -1,9 +1,4 @@
-"""Research tools exposed to the agent as an in-process MCP server.
-
-Two tools:
-- brave_search: query the Brave Search API for candidate sources
-- fetch_page:   download one URL and return its readable text
-"""
+"""Plain Python tools used by the research loop."""
 
 from __future__ import annotations
 
@@ -13,14 +8,36 @@ import re
 from typing import Any
 
 import httpx
-from claude_agent_sdk import create_sdk_mcp_server, tool
 
 BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
-MAX_PAGE_CHARS = 8_000
 
-
-def _text_result(text: str, is_error: bool = False) -> dict[str, Any]:
-    return {"content": [{"type": "text", "text": text}], "is_error": is_error}
+TOOL_DEFINITIONS: list[dict[str, Any]] = [
+    {
+        "name": "brave_search",
+        "description": (
+            "Search the web with Brave Search. Use this to find sources, facts, "
+            "and current information. Returns numbered results with title, URL, "
+            "and snippet."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "fetch_page",
+        "description": (
+            "Fetch one web page by URL and return its readable text content. "
+            "Use this to read a source before citing it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"url": {"type": "string"}},
+            "required": ["url"],
+        },
+    },
+]
 
 
 def _strip_html(raw: str) -> str:
@@ -30,78 +47,76 @@ def _strip_html(raw: str) -> str:
     return re.sub(r"\s+", " ", raw).strip()
 
 
-@tool(
-    "brave_search",
-    "Search the web with Brave Search. Call this whenever you need to find "
-    "sources, facts, or current information. Returns the top results as "
-    "numbered entries with title, URL, and snippet.",
-    {"query": str},
-)
-async def brave_search(args: dict[str, Any]) -> dict[str, Any]:
+async def brave_search(query: str) -> tuple[str, bool]:
     api_key = os.environ.get("BRAVE_API_KEY")
     if not api_key:
-        return _text_result("BRAVE_API_KEY is not set in the environment.", is_error=True)
+        return "BRAVE_API_KEY is not set in the environment.", True
 
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             resp = await client.get(
                 BRAVE_ENDPOINT,
-                params={"q": args["query"], "count": 6},
+                params={"q": query, "count": 6},
                 headers={"X-Subscription-Token": api_key, "Accept": "application/json"},
             )
     except httpx.HTTPError as exc:
-        return _text_result(f"Brave Search request failed: {exc}", is_error=True)
+        return f"Brave Search request failed: {exc}", True
 
     if resp.status_code != 200:
-        return _text_result(
-            f"Brave Search API error {resp.status_code}: {resp.text[:300]}",
-            is_error=True,
-        )
+        return f"Brave Search API error {resp.status_code}: {resp.text[:300]}", True
 
     results = resp.json().get("web", {}).get("results", [])
     if not results:
-        return _text_result(f"No results for query: {args['query']!r}")
+        return f"No results for query: {query!r}", False
 
     lines = []
-    for i, r in enumerate(results, 1):
-        snippet = _strip_html(r.get("description") or "")
-        lines.append(f"{i}. {r.get('title', '(no title)')}\n   URL: {r.get('url')}\n   {snippet}")
-    return _text_result("\n\n".join(lines))
+    for i, result in enumerate(results, 1):
+        snippet = _strip_html(result.get("description") or "")
+        lines.append(
+            f"{i}. {result.get('title', '(no title)')}\n"
+            f"   URL: {result.get('url')}\n"
+            f"   {snippet}"
+        )
+    return "\n\n".join(lines), False
 
 
-@tool(
-    "fetch_page",
-    "Fetch one web page by URL and return its readable text content "
-    f"(truncated to {MAX_PAGE_CHARS} characters). Use this to read a source "
-    "found via brave_search before citing it.",
-    {"url": str},
-)
-async def fetch_page(args: dict[str, Any]) -> dict[str, Any]:
-    url = args["url"]
+async def fetch_page(url: str) -> tuple[str, bool]:
     try:
         async with httpx.AsyncClient(
-            timeout=25, follow_redirects=True, headers={"User-Agent": "deep-research-agent/0.1"}
+            timeout=25,
+            follow_redirects=True,
+            headers={"User-Agent": "deep-research-agent/0.1"},
         ) as client:
             resp = await client.get(url)
     except httpx.HTTPError as exc:
-        return _text_result(f"Failed to fetch {url}: {exc}", is_error=True)
+        return f"Failed to fetch {url}: {exc}", True
 
     if resp.status_code != 200:
-        return _text_result(f"HTTP {resp.status_code} when fetching {url}", is_error=True)
+        return f"HTTP {resp.status_code} when fetching {url}", True
 
     content_type = resp.headers.get("content-type", "")
     if "html" in content_type:
         text = _strip_html(resp.text)
-    else:
+    elif any(kind in content_type for kind in ("text", "json", "xml")):
         text = resp.text
+    else:
+        return f"Fetched {url}, but content type is not readable text: {content_type}", True
 
-    if len(text) > MAX_PAGE_CHARS:
-        text = text[:MAX_PAGE_CHARS] + " ...[truncated]"
-    return _text_result(f"Content of {url}:\n\n{text}")
+    return f"Content of {url}:\n\n{text}", False
 
 
-research_server = create_sdk_mcp_server(
-    name="research",
-    version="0.1.0",
-    tools=[brave_search, fetch_page],
-)
+async def run_tool(name: str, args: dict[str, Any]) -> tuple[str, bool]:
+    if name == "brave_search":
+        query = str(args.get("query", "")).strip()
+        if not query:
+            return "brave_search requires a non-empty query.", True
+        return await brave_search(query)
+
+    if name == "fetch_page":
+        url = str(args.get("url", "")).strip()
+        if not url:
+            return "fetch_page requires a non-empty url.", True
+        result, is_error = await fetch_page(url)
+        return result, is_error
+
+    return f"Unknown tool: {name}", True
