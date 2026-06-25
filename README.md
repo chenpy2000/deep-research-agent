@@ -1,10 +1,12 @@
 # Deep Research Agent
 
-A minimal deep research agent with one direct model loop and two plain Python
+A minimal deep research agent with one direct model loop and three plain Python
 tools:
 
 - `brave_search(query)` finds candidate sources with Brave Search.
-- `fetch_page(url)` fetches readable page text before the agent cites a source.
+- `fetch_page(urls)` fetches readable page text for one or more URLs in
+  parallel before the agent cites sources.
+- `query_user(question)` asks the user a clarifying question in the terminal.
 
 The runtime is just direct model calls plus local Python functions.
 
@@ -13,10 +15,14 @@ The runtime is just direct model calls plus local Python functions.
 ```text
 question
   -> direct /v1/messages call
-  -> model requests brave_search or fetch_page when needed
+  -> model requests brave_search, fetch_page, or query_user when needed
   -> Python runs the requested tool and returns the observation
+  -> quality check agent accepts or rejects the candidate final answer
   -> loop repeats until the model writes the final cited report
 ```
+
+The loop exits only after the quality check accepts the candidate answer for
+completeness, comprehensiveness, and conciseness.
 
 ## Setup
 
@@ -48,5 +54,5 @@ BRAVE_API_KEY=...
 uv run research "What are the trade-offs between ReAct and plan-and-execute agent architectures?"
 ```
 
-The CLI prints each tool action, a compact observation preview, the final
-markdown report, and a small usage summary.
+The CLI prints each tool action, a compact observation preview, any
+`query_user` prompts, the final markdown report, and a small usage summary.

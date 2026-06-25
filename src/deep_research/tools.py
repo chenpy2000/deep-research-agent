@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
 import os
 import re
@@ -28,13 +29,32 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "name": "fetch_page",
         "description": (
-            "Fetch one web page by URL and return its readable text content. "
-            "Use this to read a source before citing it."
+            "Fetch web pages by URL in parallel and return their readable text "
+            "content. Use this to read sources before citing them."
         ),
         "input_schema": {
             "type": "object",
-            "properties": {"url": {"type": "string"}},
-            "required": ["url"],
+            "properties": {
+                "urls": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                }
+            },
+            "required": ["urls"],
+        },
+    },
+    {
+        "name": "query_user",
+        "description": (
+            "Ask the user a clarifying question in the terminal and return their "
+            "answer. Use this when user input, confirmation, or additional context "
+            "would help steer the research direction."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"question": {"type": "string"}},
+            "required": ["question"],
         },
     },
 ]
@@ -80,14 +100,12 @@ async def brave_search(query: str) -> tuple[str, bool]:
     return "\n\n".join(lines), False
 
 
-async def fetch_page(url: str) -> tuple[str, bool]:
+async def _fetch_single_page(
+    client: httpx.AsyncClient,
+    url: str,
+) -> tuple[str, bool]:
     try:
-        async with httpx.AsyncClient(
-            timeout=25,
-            follow_redirects=True,
-            headers={"User-Agent": "deep-research-agent/0.1"},
-        ) as client:
-            resp = await client.get(url)
+        resp = await client.get(url)
     except httpx.HTTPError as exc:
         return f"Failed to fetch {url}: {exc}", True
 
@@ -105,6 +123,42 @@ async def fetch_page(url: str) -> tuple[str, bool]:
     return f"Content of {url}:\n\n{text}", False
 
 
+async def fetch_page(urls: list[str]) -> tuple[str, bool]:
+    unique_urls = list(dict.fromkeys(url.strip() for url in urls if url.strip()))
+    if not unique_urls:
+        return "fetch_page requires at least one non-empty url.", True
+
+    async with httpx.AsyncClient(
+        timeout=25,
+        follow_redirects=True,
+        headers={"User-Agent": "deep-research-agent/0.1"},
+    ) as client:
+        results = await asyncio.gather(
+            *(_fetch_single_page(client, url) for url in unique_urls)
+        )
+
+    sections = []
+    for index, (url, (result, is_error)) in enumerate(zip(unique_urls, results), 1):
+        status = "error" if is_error else "ok"
+        sections.append(f"Fetch result {index} ({status}) for {url}:\n\n{result}")
+
+    return "\n\n---\n\n".join(sections), all(is_error for _, is_error in results)
+
+
+async def query_user(question: str) -> tuple[str, bool]:
+    print(f"\nUser question:\n{question}\n", flush=True)
+
+    try:
+        answer = await asyncio.to_thread(input, "Your answer: ")
+    except EOFError:
+        return "Could not read an answer from the terminal.", True
+
+    answer = answer.strip()
+    if not answer:
+        return "User provided an empty answer.", False
+    return f"User answered:\n{answer}", False
+
+
 async def run_tool(name: str, args: dict[str, Any]) -> tuple[str, bool]:
     if name == "brave_search":
         query = str(args.get("query", "")).strip()
@@ -113,10 +167,20 @@ async def run_tool(name: str, args: dict[str, Any]) -> tuple[str, bool]:
         return await brave_search(query)
 
     if name == "fetch_page":
-        url = str(args.get("url", "")).strip()
-        if not url:
-            return "fetch_page requires a non-empty url.", True
-        result, is_error = await fetch_page(url)
+        raw_urls = args.get("urls")
+        if raw_urls is None and args.get("url") is not None:
+            raw_urls = [args.get("url")]
+        if not isinstance(raw_urls, list):
+            return "fetch_page requires a non-empty urls list.", True
+
+        urls = [str(url).strip() for url in raw_urls if str(url).strip()]
+        result, is_error = await fetch_page(urls)
         return result, is_error
+
+    if name == "query_user":
+        question = str(args.get("question", "")).strip()
+        if not question:
+            return "query_user requires a non-empty question.", True
+        return await query_user(question)
 
     return f"Unknown tool: {name}", True
