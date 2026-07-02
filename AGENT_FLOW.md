@@ -1,16 +1,7 @@
-# deep-research-agent
+# Agent Flow
 
-A minimal deep research agent with one direct model loop and three plain Python
-tools:
-
-- `brave_search(query)` finds candidate sources with Brave Search.
-- `fetch_page(urls)` fetches readable page text for one or more URLs in
-  parallel before the agent cites sources.
-- `query_user(question)` asks the user a clarifying question in the terminal.
-
-The runtime is just direct model calls plus local Python functions.
-
-## How It Works
+This diagram shows the full runtime path from the initial user question through
+tool use, quality review, summarization, and optional follow-up research.
 
 ```mermaid
 flowchart TD
@@ -57,71 +48,15 @@ flowchart TD
   Builder -->|"append rewritten question to messages"| Runtime
 ```
 
-For a standalone copy with a target/output table, see
-[`AGENT_FLOW.md`](AGENT_FLOW.md).
+## Agent Targets And Outputs
 
-```text
-question
-  -> direct /v1/messages call
-  -> model requests brave_search, fetch_page, or query_user when needed
-  -> Python runs the requested tool and returns the observation
-  -> quality check agent audits correctness, directness, and comprehensiveness
-     and may call tools while auditing
-  -> loop repeats on rejected answers
-  -> summary agent writes a TL;DR from the accepted final answer
-  -> CLI prints the TL;DR and final cited report
-  -> user presses Enter to finish, or types a follow-up to continue researching
-  -> question builder rewrites the follow-up into the next research question
-```
-
-The loop exits only after the quality check accepts the candidate answer for
-correctness, directness, and comprehensiveness. The quality check agent returns
-structured metric flags and LLM-generated rejection reasons; if any flag fails,
-the generated rejection is returned to the research loop so the model can search
-or revise again. After all flags pass, a summary agent prints a TL;DR section
-before the detailed report. The CLI then waits for user input: pressing Enter
-ends the program, while a follow-up comment or question is passed to a question
-builder agent. That agent uses the previous target question, approved answer,
-and new user prompt to create the next research question plus comments. The
-rewritten question is appended to the conversation and becomes the target
-question used by the quality check agent.
-
-## Setup
-
-```sh
-uv sync
-```
-
-Create a `.env` file:
-
-```ini
-TRITONAI_BASE_URL=...
-TRITONAI_API_KEY=...
-TRITONAI_MODEL=...
-TRITONAI_CONTEXT_WINDOW=
-BRAVE_API_KEY=...
-```
-
-You can also use Anthropic-compatible environment names:
-
-```ini
-ANTHROPIC_BASE_URL=https://api.anthropic.com
-ANTHROPIC_API_KEY=...
-ANTHROPIC_MODEL=...
-ANTHROPIC_CONTEXT_WINDOW=
-BRAVE_API_KEY=...
-```
-
-Set `TRITONAI_CONTEXT_WINDOW` or `ANTHROPIC_CONTEXT_WINDOW` to the model's
-context window in tokens, such as `128000` or `128k`, to print per-call context
-window usage for each LLM generation. Leave it blank to disable this reporting.
-
-## Run
-
-```sh
-uv run research "What are the trade-offs between ReAct and plan-and-execute agent architectures?"
-```
-
-The CLI prints each tool action, a compact observation preview, any
-`query_user` prompts, a TL;DR section, the final markdown report, and a small
-usage summary after you accept the final answer by pressing Enter.
+| Step | Agent | Target | Tools | Output destination |
+| --- | --- | --- | --- | --- |
+| Input setup | CLI entrypoint and `run_research` | User's starting question | `argparse`, `.env` loading | Initial `messages` list |
+| Research/tool loop | `ResearchAgent` | Current research question | `brave_search`, `fetch_page`, `query_user` | Tool calls go to `run_tool`; candidate answers go to quality review |
+| Tool execution | Python tool runner | Model `tool_use` arguments | Brave Search API, `httpx`, terminal input | `tool_result` observations appended to the message list |
+| Quality audit loop | `QualityCheckAgent` | Candidate answer, target question, and tool history | Same three tools when verification helps | Structured quality JSON |
+| Rejection path | `run_research` | Failed quality flags and rejection text | Message append | Rejection returns to `ResearchAgent` for another draft |
+| Acceptance path | `SummaryAgent` | Approved detailed answer | None | Markdown TL;DR |
+| User-visible output | CLI printer | Accepted answer and summary | Terminal output | TL;DR, final cited report, usage summary |
+| Follow-up path | `QuestionBuilderAgent` | Prior question, approved answer, and new prompt | None | New standalone research question appended to `messages` |
