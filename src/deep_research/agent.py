@@ -88,16 +88,68 @@ Final answer:
 """
 
 
+class QuestionBuilderAgent(ModelAgent):
+    name = "question builder"
+    api_error_label = "Question builder"
+    max_output_tokens = 800
+    system_prompt = (
+        "You are a question building agent. Based on the old user question, "
+        "the approved final answer, and the user's new comment or question, "
+        "build the next standalone research question that best reflects what "
+        "the user wants to ask now. Include brief comments with context, "
+        "constraints, or corrections that should steer the next research turn. "
+        "Return only a JSON object with string fields: question and comments."
+    )
+
+    @classmethod
+    def parse_result(cls, text: str) -> tuple[str, str]:
+        raw = text.strip()
+        if raw.startswith("```"):
+            raw = raw.strip("`").strip()
+            if raw.startswith("json"):
+                raw = raw[4:].strip()
+
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError:
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start == -1 or end == -1 or end <= start:
+                raise RuntimeError(
+                    "Question builder did not return a JSON object: "
+                    f"{text}"
+                ) from None
+            value = json.loads(raw[start : end + 1])
+
+        if not isinstance(value, dict):
+            raise RuntimeError(
+                f"Question builder returned invalid JSON: {text}"
+            )
+
+        question = value.get("question")
+        comments = value.get("comments", "")
+        if not isinstance(question, str) or not question.strip():
+            raise RuntimeError(
+                f"Question builder returned an empty question: {text}"
+            )
+        if not isinstance(comments, str):
+            raise RuntimeError(
+                f"Question builder returned invalid comments: {text}"
+            )
+
+        return question.strip(), comments.strip()
+
+
 class QualityCheckAgent(ModelAgent):
     name = "quality check"
     api_error_label = "Quality check"
     max_output_tokens = 1000
     criteria: ClassVar[list[dict[str, str]]] = [
         {
-            "name": "completeness",
+            "name": "answers_user_question",
             "type": "boolean",
-            "explanation": "is the user's question fully answered?",
-            "rejection": "user's question is not fully answered",
+            "explanation": "does it answer the user's question?",
+            "rejection": "does not answer the user's question",
         },
         {
             "name": "comprehensiveness",

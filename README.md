@@ -21,11 +21,18 @@ question
   -> loop repeats on rejected answers
   -> summary agent writes a TL;DR from the accepted final answer
   -> CLI prints the TL;DR and final cited report
+  -> user presses Enter to finish, or types a follow-up to continue researching
+  -> question builder rewrites the follow-up into the next research question
 ```
 
 The loop exits only after the quality check accepts the candidate answer for
 completeness and comprehensiveness. After that, a summary agent prints a TL;DR
-section before the detailed report.
+section before the detailed report. The CLI then waits for user input: pressing
+Enter ends the program, while a follow-up comment or question is passed to a
+question builder agent. That agent uses the previous target question, approved
+answer, and new user prompt to create the next research question plus comments.
+The rewritten question is appended to the conversation and becomes the target
+question used by the quality check agent.
 
 ## Setup
 
@@ -65,4 +72,4 @@ uv run research "What are the trade-offs between ReAct and plan-and-execute agen
 
 The CLI prints each tool action, a compact observation preview, any
 `query_user` prompts, a TL;DR section, the final markdown report, and a small
-usage summary.
+usage summary after you accept the final answer by pressing Enter.
