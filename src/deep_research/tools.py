@@ -10,6 +10,8 @@ from typing import Any
 
 import httpx
 
+from .utils import format_cli_section, raw_cli_text, style_cli
+
 BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 
 TOOL_DEFINITIONS: list[dict[str, Any]] = [
@@ -146,10 +148,17 @@ async def fetch_page(urls: list[str]) -> tuple[str, bool]:
 
 
 async def query_user(question: str) -> tuple[str, bool]:
-    print(f"\nUser question:\n{question}\n", flush=True)
+    print(
+        f"\n{format_cli_section('User question', 'prompt')}:\n"
+        f"{raw_cli_text(question)}\n",
+        flush=True,
+    )
 
     try:
-        answer = await asyncio.to_thread(input, "Your answer: ")
+        answer = await asyncio.to_thread(
+            input,
+            style_cli("Your answer: ", "prompt"),
+        )
     except EOFError:
         return "Could not read an answer from the terminal.", True
 

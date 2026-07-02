@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
+import sys
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TextIO
 
 
 @dataclass(frozen=True)
@@ -136,6 +138,100 @@ def usage_value(usage: dict[str, Any], *keys: str) -> int:
     return 0
 
 
+ANSI_RESET = "\033[0m"
+CLI_STYLES = {
+    "accent": "1;38;5;81",
+    "args": "38;5;153",
+    "error": "1;38;5;203",
+    "info": "1;38;5;75",
+    "muted": "38;5;244",
+    "observation": "1;38;5;86",
+    "prompt": "1;38;5;213",
+    "quality": "1;38;5;221",
+    "raw": "97",
+    "success": "1;38;5;82",
+    "tool": "1;38;5;177",
+    "warning": "1;38;5;214",
+}
+
+
+def _colors_enabled(stream: TextIO | None = None) -> bool:
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("FORCE_COLOR"):
+        return True
+    if os.environ.get("TERM") == "dumb":
+        return False
+
+    target = stream or sys.stdout
+    return bool(getattr(target, "isatty", lambda: False)())
+
+
+def style_cli(text: str, style: str = "raw", stream: TextIO | None = None) -> str:
+    code = CLI_STYLES.get(style)
+    if not code or not _colors_enabled(stream):
+        return text
+    return f"\033[{code}m{text}{ANSI_RESET}"
+
+
+def raw_cli_text(text: str, stream: TextIO | None = None) -> str:
+    return style_cli(text, "raw", stream)
+
+
+def format_status(
+    message: str,
+    tone: str = "info",
+    stream: TextIO | None = None,
+) -> str:
+    prefix = style_cli("[deep-research]", tone, stream)
+    body = style_cli(message, "muted", stream)
+    return f"{prefix} {body}"
+
+
+def format_cli_section(
+    title: str,
+    tone: str = "info",
+    stream: TextIO | None = None,
+) -> str:
+    return style_cli(title, tone, stream)
+
+
+def _format_tool_args(args: dict[str, Any]) -> str:
+    try:
+        return json.dumps(args, ensure_ascii=False, sort_keys=True)
+    except TypeError:
+        return repr(args)
+
+
+def format_tool_call(
+    label: str,
+    name: str,
+    args: dict[str, Any],
+    tone: str = "tool",
+    stream: TextIO | None = None,
+) -> str:
+    args_text = _format_tool_args(args)
+    return (
+        "\n"
+        f"{style_cli('>>', tone, stream)} "
+        f"{style_cli(label, tone, stream)}"
+        f"{style_cli(':', 'muted', stream)} "
+        f"{style_cli(name, 'accent', stream)}"
+        f"{style_cli(f'({args_text})', 'args', stream)}"
+    )
+
+
+def format_observation(
+    title: str,
+    observation: str,
+    tone: str = "observation",
+    stream: TextIO | None = None,
+) -> str:
+    heading = format_cli_section(title, tone, stream)
+    body = raw_cli_text(observation, stream)
+    return f"\n{heading}:\n{body}\n"
+
+
 def format_k_tokens(tokens: int) -> str:
     return f"{tokens / 1_000:.3f}K"
 
@@ -153,19 +249,21 @@ def print_context_window_usage(
     total_tokens = input_tokens + output_tokens
     if total_tokens <= 0:
         print(
-            f"[deep-research] context window ({label}): usage unavailable",
+            format_status(f"context window ({label}): usage unavailable"),
             flush=True,
         )
         return
 
     percent = total_tokens / settings.context_window_tokens * 100
     print(
-        "[deep-research] context window "
-        f"({label}): {percent:.2f}% used "
-        f"({format_k_tokens(total_tokens)} / "
-        f"{format_k_tokens(settings.context_window_tokens)} tokens; "
-        f"input={format_k_tokens(input_tokens)}, "
-        f"output={format_k_tokens(output_tokens)})",
+        format_status(
+            "context window "
+            f"({label}): {percent:.2f}% used "
+            f"({format_k_tokens(total_tokens)} / "
+            f"{format_k_tokens(settings.context_window_tokens)} tokens; "
+            f"input={format_k_tokens(input_tokens)}, "
+            f"output={format_k_tokens(output_tokens)})"
+        ),
         flush=True,
     )
 
@@ -184,10 +282,13 @@ def print_done(
     tool_summary = ", ".join(
         f"{name}={count}" for name, count in sorted(tool_counts.items())
     )
-    print("\n[deep-research] done.")
-    print(f"[deep-research] tool calls: {tool_summary}")
+    print("\n" + format_status("done.", "success"))
+    print(format_status(f"tool calls: {tool_summary}", "info"))
     print(
-        "[deep-research] LLM tokens: "
-        f"input={format_k_tokens(llm_input_tokens)}, "
-        f"output={format_k_tokens(llm_output_tokens)}"
+        format_status(
+            "LLM tokens: "
+            f"input={format_k_tokens(llm_input_tokens)}, "
+            f"output={format_k_tokens(llm_output_tokens)}",
+            "info",
+        )
     )

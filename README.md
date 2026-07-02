@@ -17,7 +17,8 @@ question
   -> direct /v1/messages call
   -> model requests brave_search, fetch_page, or query_user when needed
   -> Python runs the requested tool and returns the observation
-  -> quality check agent accepts or rejects the candidate final answer
+  -> quality check agent audits correctness, directness, and comprehensiveness
+     and may call tools while auditing
   -> loop repeats on rejected answers
   -> summary agent writes a TL;DR from the accepted final answer
   -> CLI prints the TL;DR and final cited report
@@ -26,12 +27,15 @@ question
 ```
 
 The loop exits only after the quality check accepts the candidate answer for
-completeness and comprehensiveness. After that, a summary agent prints a TL;DR
-section before the detailed report. The CLI then waits for user input: pressing
-Enter ends the program, while a follow-up comment or question is passed to a
-question builder agent. That agent uses the previous target question, approved
-answer, and new user prompt to create the next research question plus comments.
-The rewritten question is appended to the conversation and becomes the target
+correctness, directness, and comprehensiveness. The quality check agent returns
+structured metric flags and LLM-generated rejection reasons; if any flag fails,
+the generated rejection is returned to the research loop so the model can search
+or revise again. After all flags pass, a summary agent prints a TL;DR section
+before the detailed report. The CLI then waits for user input: pressing Enter
+ends the program, while a follow-up comment or question is passed to a question
+builder agent. That agent uses the previous target question, approved answer,
+and new user prompt to create the next research question plus comments. The
+rewritten question is appended to the conversation and becomes the target
 question used by the quality check agent.
 
 ## Setup

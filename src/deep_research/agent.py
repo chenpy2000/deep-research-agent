@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 from typing import Any, ClassVar
 
@@ -9,6 +10,20 @@ import httpx
 
 from .tools import TOOL_DEFINITIONS
 from .utils import ApiSettings, headers, messages_url, response_text
+
+
+@dataclass(frozen=True)
+class QualityMetricResult:
+    name: str
+    passed: bool
+    reason: str
+
+
+@dataclass(frozen=True)
+class QualityCheckResult:
+    metrics: list[QualityMetricResult]
+    flags: list[bool]
+    rejection: str
 
 
 class ModelAgent:
@@ -143,30 +158,65 @@ class QuestionBuilderAgent(ModelAgent):
 class QualityCheckAgent(ModelAgent):
     name = "quality check"
     api_error_label = "Quality check"
-    max_output_tokens = 1000
+    max_output_tokens = 2000
+    tools = TOOL_DEFINITIONS
     criteria: ClassVar[list[dict[str, str]]] = [
+        {
+            "name": "correctness",
+            "type": "boolean",
+            "explanation": (
+                "are important claims supported by reliable/current sources, "
+                "is freshness checked when relevant, and does the reasoning "
+                "follow from gathered resources?"
+            ),
+        },
         {
             "name": "answers_user_question",
             "type": "boolean",
             "explanation": "does it answer the user's question?",
-            "rejection": "does not answer the user's question",
         },
         {
             "name": "comprehensiveness",
             "type": "boolean",
             "explanation": (
-                "are the retrieved context comprehensive enough to make a convincing "
+                "is the retrieved context comprehensive enough to make a convincing "
                 "answer?"
             ),
-            "rejection": "does not collect enough data before making the answer",
         },
     ]
-    system_prompt = (
-        "You are a quality check agent. Evaluate whether a candidate final "
-        "answer satisfies each criterion. Return only a JSON array of booleans "
-        "in the same order as the criteria, such as [true, false]. Do "
-        "not return prose, labels, markdown, or explanations."
-    )
+    system_prompt = """\
+You are a quality check agent. Audit a candidate final answer before it is
+shown to the user.
+
+You may call tools when they help you verify facts, source reliability,
+freshness, reasoning, or coverage:
+- brave_search(query): search for current or corroborating sources.
+- fetch_page(urls): read source pages before relying on them.
+- query_user(question): ask the user only if human clarification is necessary.
+
+Evaluate the metrics in this exact order:
+1. correctness: important claims are supported by reliable/current sources,
+   freshness is checked when relevant, and reasoning follows from gathered
+   resources.
+2. answers_user_question: the candidate directly answers the user's question.
+3. comprehensiveness: the retrieved context is broad and deep enough for a
+   convincing answer.
+
+When you are done auditing, return only this JSON object shape:
+{
+  "metrics": [
+    {"name": "correctness", "passed": true, "reason": "..."},
+    {"name": "answers_user_question", "passed": true, "reason": "..."},
+    {"name": "comprehensiveness", "passed": true, "reason": "..."}
+  ],
+  "flags": [true, true, true],
+  "rejection": ""
+}
+
+The flags list must match the metric passed values. If any metric fails,
+write a concise actionable rejection using your generated reasons. Do not
+return markdown, labels, or prose outside the JSON object.
+"""
 
     @classmethod
     def output_text(cls, response: dict[str, Any]) -> str:
@@ -184,55 +234,123 @@ class QualityCheckAgent(ModelAgent):
         ).strip()
 
     @classmethod
-    def validate_flags(cls, values: Any, source: str) -> list[bool]:
-        if (
-            isinstance(values, list)
-            and len(values) == len(cls.criteria)
-            and all(isinstance(value, bool) for value in values)
-        ):
-            return values
-
-        raise RuntimeError(
-            f"Quality check agent returned invalid criterion flags: {source}"
-        )
+    def metric_names(cls) -> list[str]:
+        return [criterion["name"] for criterion in cls.criteria]
 
     @classmethod
-    def parse_flags(cls, text: str) -> list[bool]:
+    def _strip_json_markdown(cls, text: str) -> str:
         raw = text.strip()
         if raw.startswith("```"):
-            raw = raw.strip("`").strip()
+            lines = raw.splitlines()
+            if lines and lines[0].strip().startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            raw = "\n".join(lines).strip()
             if raw.startswith("json"):
                 raw = raw[4:].strip()
+        return raw
 
+    @classmethod
+    def parse_result(cls, text: str) -> QualityCheckResult:
+        raw = cls._strip_json_markdown(text)
         try:
-            values = json.loads(raw)
+            value = json.loads(raw)
         except json.JSONDecodeError:
-            start = raw.find("[")
-            end = raw.rfind("]")
+            start = raw.find("{")
+            end = raw.rfind("}")
             if start == -1 or end == -1 or end <= start:
                 raise RuntimeError(
-                    "Quality check agent did not return a JSON boolean list: "
+                    "Quality check agent did not return a JSON object: "
                     f"{text}"
                 ) from None
-            values = json.loads(raw[start : end + 1])
+            value = json.loads(raw[start : end + 1])
 
-        return cls.validate_flags(values, text)
-
-    @classmethod
-    def failed_criteria(cls, flags: list[bool]) -> list[dict[str, str]]:
-        return [
-            criterion
-            for criterion, passed in zip(cls.criteria, flags)
-            if not passed
-        ]
+        return cls.validate_result(value, text)
 
     @classmethod
-    def format_rejection(cls, failed_criteria: list[dict[str, str]]) -> str:
-        failures = ", ".join(
-            f"{criterion['name']}: {criterion['rejection']}"
-            for criterion in failed_criteria
+    def validate_result(cls, value: Any, source: str) -> QualityCheckResult:
+        if not isinstance(value, dict):
+            raise RuntimeError(
+                f"Quality check agent returned invalid JSON: {source}"
+            )
+
+        raw_metrics = value.get("metrics")
+        flags = value.get("flags")
+        rejection = value.get("rejection", "")
+        expected_names = cls.metric_names()
+
+        if not isinstance(raw_metrics, list) or len(raw_metrics) != len(expected_names):
+            raise RuntimeError(
+                f"Quality check agent returned invalid metrics: {source}"
+            )
+        if (
+            not isinstance(flags, list)
+            or len(flags) != len(expected_names)
+            or not all(isinstance(flag, bool) for flag in flags)
+        ):
+            raise RuntimeError(
+                f"Quality check agent returned invalid flags: {source}"
+            )
+        if not isinstance(rejection, str):
+            raise RuntimeError(
+                f"Quality check agent returned invalid rejection: {source}"
+            )
+
+        metrics: list[QualityMetricResult] = []
+        for index, raw_metric in enumerate(raw_metrics):
+            if not isinstance(raw_metric, dict):
+                raise RuntimeError(
+                    f"Quality check agent returned invalid metric: {source}"
+                )
+            name = raw_metric.get("name")
+            passed = raw_metric.get("passed")
+            reason = raw_metric.get("reason")
+            if name != expected_names[index]:
+                raise RuntimeError(
+                    f"Quality check agent returned metrics out of order: {source}"
+                )
+            if not isinstance(passed, bool) or not isinstance(reason, str):
+                raise RuntimeError(
+                    f"Quality check agent returned invalid metric fields: {source}"
+                )
+            if not reason.strip():
+                raise RuntimeError(
+                    f"Quality check agent returned an empty metric reason: {source}"
+                )
+            metrics.append(
+                QualityMetricResult(name=name, passed=passed, reason=reason.strip())
+            )
+
+        metric_flags = [metric.passed for metric in metrics]
+        if flags != metric_flags:
+            raise RuntimeError(
+                f"Quality check agent returned mismatched flags: {source}"
+            )
+
+        return QualityCheckResult(
+            metrics=metrics,
+            flags=flags,
+            rejection=rejection.strip(),
         )
-        return f"output rejected for not satisfying: [{failures}]"
+
+    @classmethod
+    def failed_metrics(
+        cls,
+        result: QualityCheckResult,
+    ) -> list[QualityMetricResult]:
+        return [metric for metric in result.metrics if not metric.passed]
+
+    @classmethod
+    def format_rejection(cls, result: QualityCheckResult) -> str:
+        if result.rejection:
+            return result.rejection
+
+        failures = "; ".join(
+            f"{metric.name}: {metric.reason}"
+            for metric in cls.failed_metrics(result)
+        )
+        return f"Quality check rejected the answer: {failures}"
 
 
 class SummaryAgent(ModelAgent):
